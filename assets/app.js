@@ -314,6 +314,85 @@
     ]);
   }
 
+  function normalizeDriveId(input) {
+    const raw = String(input || "").trim();
+    if (!raw) return "";
+
+    if (!raw.includes("/") && !raw.includes("?")) return raw;
+
+    const foldersMatch = raw.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+    if (foldersMatch && foldersMatch[1]) return foldersMatch[1];
+
+    const dMatch = raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (dMatch && dMatch[1]) return dMatch[1];
+
+    try {
+      const parsed = new URL(raw);
+      const byQuery = parsed.searchParams.get("id");
+      if (byQuery) return byQuery;
+    } catch (_e) {
+      // no-op
+    }
+
+    const queryMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (queryMatch && queryMatch[1]) return queryMatch[1];
+
+    return raw;
+  }
+
+  async function backendFetchJson(path, { method = "GET", data = null } = {}) {
+    const s = state.settings;
+    const url = `${s.backend_base_url}${path}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number(s.backend_timeout_ms || 20000));
+
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": "{{setting.backend_api_key}}",
+        },
+        body: data ? JSON.stringify(data) : undefined,
+        signal: controller.signal,
+      });
+
+      const bodyText = await res.text();
+      let bodyJson = null;
+      if (bodyText) {
+        try {
+          bodyJson = JSON.parse(bodyText);
+        } catch (_e) {
+          bodyJson = null;
+        }
+      }
+
+      if (!res.ok) {
+        const err = new Error(`Backend ${res.status}: ${bodyText || res.statusText || "Error"}`);
+        err.status = res.status;
+        err.body = bodyText;
+        err.json = bodyJson;
+        throw err;
+      }
+
+      return {
+        status: res.status,
+        body: bodyText,
+        json: bodyJson,
+      };
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        const timeoutError = new Error("Timeout de backend");
+        timeoutError.status = 0;
+        timeoutError.body = "";
+        throw timeoutError;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   function backendRequest(path, { method = "GET", data = null, qs = "" } = {}) {
     const s = state.settings;
     const url = `${s.backend_base_url}${path}${qs || ""}`;
@@ -467,20 +546,21 @@
 
       setStatus("Creando/asegurando carpeta Drive...");
 
+      const normalizedRootFolderId = normalizeDriveId(state.settings.drive_root_folder_id);
+
       const payload = Object.assign({}, state.payload, {
-        drive_root_folder_id: state.settings.drive_root_folder_id,
-        drive_shared_drive_id: state.settings.drive_shared_drive_id || undefined,
+        drive_root_folder_id: normalizedRootFolderId,
       });
 
       debug.payload = payload;
 
-      const res = await backendRequest("/drive/folder/ensure", {
+      const res = await backendFetchJson("/drive/folder/ensure", {
         method: "POST",
         data: payload,
       });
 
-      debug.response = res;
-      const data = res && res.data ? res.data : res;
+      debug.response = res.json || { status: res.status, body: res.body };
+      const data = res.json || {};
 
       state.drive_folder_url = data.drive_folder_url || data.folder_url || state.drive_folder_url;
       state.drive_folder_id = data.drive_folder_id || data.folder_id || state.drive_folder_id;
@@ -493,7 +573,11 @@
       // refrescar status para cargar templates/links si backend lo soporta
       refreshStatus();
     } catch (e) {
-      debug.error = { name: e && e.name, message: e && e.message };
+      debug.error = {
+        message: (e && e.message) || "Error",
+        status: e && Object.prototype.hasOwnProperty.call(e, "status") ? e.status : null,
+        body: e && Object.prototype.hasOwnProperty.call(e, "body") ? e.body : null,
+      };
       setStatus(e && e.message ? e.message : "Error");
       setDebug(debug);
     }
