@@ -1,0 +1,44 @@
+{
+  "name": "Generar Exámenes | Drive",
+  "author": {
+    "name": "Clinyco",
+    "email": "soporte@clinyco.com"
+  },
+  "version": "1.0.0",
+  "frameworkVersion": "2.0",
+  "location": {
+    "sell": {
+      "deal_card": "assets/iframe.html"
+    }
+  },
+  "domainWhitelist": [
+    "sell-medinet-backend.onrender.com"
+  ],
+  "parameters": [
+    {
+      "name": "backend_base_url",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "backend_api_key",
+      "type": "text",
+      "required": true,
+      "secure": true,
+      "scopes": [
+        "header"
+      ]
+    },
+    {
+      "name": "drive_root_folder_id",
+      "type": "text",
+      "required": true
+    },
+    {
+      "name": "drive_shared_drive_id",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "defaultLocale": "es"
+}
