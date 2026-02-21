@@ -25,7 +25,7 @@
       "name": "backend_api_key",
       "type": "text",
       "required": true,
-      "scopes": [
+      [
         "header"
       ]
     },
