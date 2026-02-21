@@ -1,0 +1,13 @@
+# Archives and artifacts
+*.zip
+*.tar
+*.gz
+
+# Binary/media artifacts should not be committed in this app repo
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.ico
+
+.DS_Store

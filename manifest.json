@@ -4,7 +4,7 @@
     "name": "Clinyco",
     "email": "soporte@clinyco.com"
   },
-  "version": "1.0.2",
+  "version": "1.0.4",
   "frameworkVersion": "2.0",
   "location": {
     "sell": {
@@ -24,7 +24,11 @@
     {
       "name": "backend_api_key",
       "type": "text",
-      "required": true
+      "required": true,
+      "secure": true,
+      "scopes": [
+        "header"
+      ]
     },
     {
       "name": "drive_root_folder_id",

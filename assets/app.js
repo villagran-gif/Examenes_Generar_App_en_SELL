@@ -132,17 +132,13 @@
 
   async function getSettings() {
     const metadata = await client.metadata().catch(() => ({}));
-    let settings =
+    const metadataSettings =
       (metadata && metadata.settings) ||
       (metadata && metadata.installationSettings) ||
       (metadata && metadata.config) ||
       {};
 
-    const got = await client.get("settings").catch(() => ({}));
-    if (got && Object.keys(got).length) {
-      const fromGet = got.settings && Object.keys(got.settings).length ? got.settings : got;
-      settings = Object.assign({}, settings, fromGet);
-    }
+    const settings = Object.assign({}, metadataSettings);
 
     const baseUrl =
       settings.backend_base_url ||
@@ -158,11 +154,11 @@
       settings.rootFolderId ||
       "";
 
-    const apiKey =
-      settings.backend_api_key ||
-      settings.backendApiKey ||
-      settings.api_key ||
-      settings.apiKey ||
+    const sharedDriveId =
+      settings.drive_shared_drive_id ||
+      settings.driveSharedDriveId ||
+      settings.shared_drive_id ||
+      settings.sharedDriveId ||
       "";
 
     const timeout =
@@ -174,9 +170,9 @@
 
     return {
       backend_base_url: String(baseUrl || "").trim().replace(/\/$/, ""),
-      backend_api_key: String(apiKey || "").trim(),
       drive_root_folder_id: String(rootFolderId || "").trim(),
-      backend_timeout_ms: Number(timeout || 20000),
+      drive_shared_drive_id: String(sharedDriveId || "").trim(),
+      backend_timeout_ms: Math.max(Number(timeout || 20000), 1000),
     };
   }
 
@@ -360,52 +356,51 @@
     render: "/v1/render",
   };
 
-  async function backendFetchJson(path, { method = "GET", data = null } = {}) {
+  async function requestBackend(path, method = "GET", payload = null, { timeoutMs } = {}) {
     const s = state.settings;
     const url = `${s.backend_base_url}${path}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Number(s.backend_timeout_ms || 20000));
+    const timeout = Number(timeoutMs || s.backend_timeout_ms || 20000);
+
+    const options = {
+      url,
+      type: method,
+      secure: true,
+      contentType: "application/json",
+      timeout,
+      headers: {
+        "x-api-key": "{{setting.backend_api_key}}",
+      },
+    };
+    if (payload && method !== "GET") {
+      options.data = JSON.stringify(payload);
+    }
 
     try {
-      const res = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": s.backend_api_key,
-        },
-        body: data ? JSON.stringify(data) : undefined,
-        signal: controller.signal,
-      });
-
-      const bodyText = await res.text();
-      let bodyJson = null;
-      if (bodyText) {
-        try {
-          bodyJson = JSON.parse(bodyText);
-        } catch (_e) {
-          bodyJson = null;
-        }
-      }
-
-      if (!res.ok) {
-        const err = new Error(`Backend ${res.status}: ${bodyText || res.statusText || "Error"}`);
-        err.status = res.status;
-        err.body = bodyText;
-        err.json = bodyJson;
-        throw err;
-      }
-
-      return { status: res.status, body: bodyText, json: bodyJson };
+      const response = await client.request(options);
+      const body = response && Object.prototype.hasOwnProperty.call(response, "data")
+        ? response.data
+        : response;
+      return {
+        status: 200,
+        body,
+        endpoint: path,
+        request_url: url,
+      };
     } catch (e) {
-      if (e && e.name === "AbortError") {
-        const timeoutError = new Error("Timeout de backend");
-        timeoutError.status = 0;
-        timeoutError.body = "";
-        throw timeoutError;
-      }
-      throw e;
-    } finally {
-      clearTimeout(timeout);
+      const status = Number(e && (e.status || e.statusCode || (e.responseJSON && e.responseJSON.status))) || 0;
+      const body =
+        (e && (e.responseText || (e.responseJSON && JSON.stringify(e.responseJSON)) || e.message)) ||
+        "";
+      const message =
+        status === 401 || status === 403
+          ? "Configura backend_api_key en la instalación de la app"
+          : `Backend ${status || "Error"}: ${body || "Error"}`;
+      const err = new Error(message);
+      err.status = status;
+      err.body = body;
+      err.endpoint = path;
+      err.request_url = url;
+      throw err;
     }
   }
 
@@ -414,6 +409,8 @@
       message: (error && error.message) || "Error",
       status: error && Object.prototype.hasOwnProperty.call(error, "status") ? error.status : null,
       body: error && Object.prototype.hasOwnProperty.call(error, "body") ? error.body : null,
+      endpoint: error && Object.prototype.hasOwnProperty.call(error, "endpoint") ? error.endpoint : null,
+      request_url: error && Object.prototype.hasOwnProperty.call(error, "request_url") ? error.request_url : null,
     };
   }
 
@@ -500,11 +497,13 @@
     try {
       setStatus("Cargando estado...");
 
-      debug.request = {};
-      const res = await backendFetchJson(API_ROUTES.config);
-      const data = res.json || {};
+      debug.request = { endpoint: API_ROUTES.config, request_url: `${state.settings.backend_base_url}${API_ROUTES.config}`, method: "GET" };
+      const res = await requestBackend(API_ROUTES.config, "GET", null, {
+        timeoutMs: state.settings.backend_timeout_ms,
+      });
+      const data = res.body || {};
 
-      debug.response = data;
+      debug.response = { status: res.status, body: data };
 
       const templateEntries = [];
       if (Array.isArray(data.templates)) {
@@ -526,7 +525,7 @@
       }
       populateTemplates(templateEntries.filter((item) => item && item.key));
 
-      if (btnOpenFolder) btnOpenFolder.disabled = !state.deal_folder_url;
+      if (btnOpenFolder) btnOpenFolder.disabled = !(state.deal_folder_url || state.deal_folder_id);
       if (btnCreateNote) btnCreateNote.disabled = false;
 
       setStatus("Listo ✅");
@@ -564,21 +563,28 @@
         deal_id: Number(state.deal.id),
         drive_root_folder_id: normalizedRootFolderId,
       };
+      if (state.settings.drive_shared_drive_id) {
+        payload.drive_shared_drive_id = state.settings.drive_shared_drive_id;
+      }
 
+      debug.request = { endpoint: API_ROUTES.driveFolderEnsure, request_url: `${state.settings.backend_base_url}${API_ROUTES.driveFolderEnsure}`, method: "POST" };
       debug.payload = payload;
 
-      const res = await backendFetchJson(API_ROUTES.driveFolderEnsure, {
-        method: "POST",
-        data: payload,
+      const res = await requestBackend(API_ROUTES.driveFolderEnsure, "POST", payload, {
+        timeoutMs: state.settings.backend_timeout_ms,
       });
 
-      debug.response = res.json || { status: res.status, body: res.body };
-      const data = res.json || {};
+      debug.response = { status: res.status, body: res.body };
+      const data = res.body || {};
 
       state.deal_folder_url = data.web_view_url || data.drive_folder_url || data.folder_url || state.deal_folder_url;
       state.deal_folder_id = data.folder_id || data.drive_folder_id || state.deal_folder_id;
+      if (state.deal) {
+        state.deal.folder_id = state.deal_folder_id;
+        state.deal.web_view_url = state.deal_folder_url;
+      }
 
-      if (btnOpenFolder) btnOpenFolder.disabled = !state.deal_folder_url;
+      if (btnOpenFolder) btnOpenFolder.disabled = !(state.deal_folder_url || state.deal_folder_id);
       if (btnGenerate) btnGenerate.disabled = !state.deal_folder_id;
 
       setStatus("Carpeta lista ✅");
@@ -594,7 +600,23 @@
   }
 
   function onOpenFolder() {
-    openUrlSafely(state.deal_folder_url || state.last_doc_url);
+    const fallbackUrl = state.deal_folder_id
+      ? `https://drive.google.com/drive/folders/${state.deal_folder_id}`
+      : null;
+    openUrlSafely(state.deal_folder_url || fallbackUrl || state.last_doc_url);
+  }
+
+  function validateRequiredPlaceholders(objectPayload, fecha) {
+    const required = [
+      ["object.run", objectPayload.run],
+      ["object.nombres", objectPayload.nombres],
+      ["object.paterno", objectPayload.paterno],
+      ["object.prevision", objectPayload.prevision],
+      ["object.fecha_nacimiento", objectPayload.fecha_nacimiento],
+      ["fecha", fecha],
+    ];
+
+    return required.filter(([, value]) => !String(value || "").trim()).map(([name]) => name);
   }
 
   async function onGenerate() {
@@ -624,11 +646,18 @@
         run: state.payload.rut,
         nombres: state.payload.first_name,
         paterno: state.payload.last_name,
-        prevision: state.payload.tramo_modalidad,
+        prevision: state.payload.tramo_modalidad || "SIN INFORMACIÓN",
+        fecha_nacimiento: state.payload.birth_date,
       });
 
+      const fecha = new Date().toISOString().slice(0, 10);
+      const missing = validateRequiredPlaceholders(objectPayload, fecha);
+      if (missing.length) {
+        throw new Error(`Faltan placeholders requeridos: ${missing.join(", ")}`);
+      }
+
       const payload = {
-        fecha: new Date().toISOString().slice(0, 10),
+        fecha,
         object: objectPayload,
         deal: {
           folder_id: state.deal_folder_id,
@@ -638,15 +667,15 @@
       if (selectedKind === "package") payload.package_key = selectedKey;
       else payload.template_key = selectedKey;
 
+      debug.request = { endpoint: API_ROUTES.render, request_url: `${state.settings.backend_base_url}${API_ROUTES.render}`, method: "POST" };
       debug.payload = payload;
 
-      const res = await backendFetchJson(API_ROUTES.render, {
-        method: "POST",
-        data: payload,
+      const res = await requestBackend(API_ROUTES.render, "POST", payload, {
+        timeoutMs: state.settings.backend_timeout_ms,
       });
 
-      debug.response = res.json || { status: res.status, body: res.body };
-      const data = res.json || {};
+      debug.response = { status: res.status, body: res.body };
+      const data = res.body || {};
 
       const url = data.pdf_web_view_url || data.doc_url || data.url || data.download_url || data.webViewLink || null;
       state.last_doc_url = url || state.last_doc_url;
@@ -756,9 +785,6 @@
         debug.warnings.push("backend_base_url vacío; usando default");
         state.settings.backend_base_url = DEFAULT_BACKEND_BASE_URL;
       }
-      if (!state.settings.backend_api_key) {
-        debug.warnings.push("Falta backend_api_key (requerido para backend Render)");
-      }
       if (!state.settings.drive_root_folder_id) {
         debug.warnings.push("Falta drive_root_folder_id (requerido para Drive)");
       }
@@ -797,14 +823,14 @@
       if (btnOpenFolder) btnOpenFolder.disabled = true;
 
       // Si falta root folder, deshabilitar acciones Drive que lo requieren
-      if (!state.settings.drive_root_folder_id || !state.settings.backend_api_key) {
+      if (!state.settings.drive_root_folder_id) {
         if (btnEnsureFolder) btnEnsureFolder.disabled = true;
         if (btnGenerate) btnGenerate.disabled = true;
         if (templateSelect) {
           templateSelect.disabled = true;
-          templateSelect.innerHTML = "<option value=\"\">(Configura backend_api_key y drive_root_folder_id)</option>";
+          templateSelect.innerHTML = "<option value=\"\">(Configura drive_root_folder_id)</option>";
         }
-        setStatus("Configura backend_api_key y drive_root_folder_id para habilitar Drive.");
+        setStatus("Configura drive_root_folder_id para habilitar Drive.");
       } else {
         // cargar status y templates si existe
         await refreshStatus();
