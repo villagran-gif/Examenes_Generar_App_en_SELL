@@ -20,7 +20,7 @@ App privada para Zendesk Sell (ubicación: deal_card). Permite:
 
 ## Parámetros de instalación
 
-- backend_base_url (opcional): si se omite, usa https://sell-medinet-backend.onrender.com
+- backend_base_url (opcional): si se omite, usa https://sell-medinet-documentos-dinamicos-pdf.onrender.com
 - backend_api_key (secure, header)
 - drive_root_folder_id (required)
 - drive_shared_drive_id (opcional)
