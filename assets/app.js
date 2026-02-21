@@ -353,6 +353,13 @@
     return raw;
   }
 
+
+  const API_ROUTES = {
+    config: "/v1/config",
+    driveFolderEnsure: "/v1/drive/folder/ensure",
+    render: "/v1/render",
+  };
+
   async function backendFetchJson(path, { method = "GET", data = null } = {}) {
     const s = state.settings;
     const url = `${s.backend_base_url}${path}`;
@@ -494,7 +501,7 @@
       setStatus("Cargando estado...");
 
       debug.request = {};
-      const res = await backendFetchJson("/v1/config");
+      const res = await backendFetchJson(API_ROUTES.config);
       const data = res.json || {};
 
       debug.response = data;
@@ -560,7 +567,7 @@
 
       debug.payload = payload;
 
-      const res = await backendFetchJson("/v1/drive/folder/ensure", {
+      const res = await backendFetchJson(API_ROUTES.driveFolderEnsure, {
         method: "POST",
         data: payload,
       });
@@ -633,7 +640,7 @@
 
       debug.payload = payload;
 
-      const res = await backendFetchJson("/v1/render", {
+      const res = await backendFetchJson(API_ROUTES.render, {
         method: "POST",
         data: payload,
       });
