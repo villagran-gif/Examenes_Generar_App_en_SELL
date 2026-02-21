@@ -24,12 +24,7 @@
     {
       "name": "backend_api_key",
       "type": "text",
-      "required": true,
-      "secure": true,
-      "scopes": [
-        "header"
-      ]
-      "secure": true
+      "required": true
     },
     {
       "name": "drive_root_folder_id",
