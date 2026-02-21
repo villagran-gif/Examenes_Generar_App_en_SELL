@@ -59,9 +59,29 @@
     scheduleResize();
   }
 
+  function maskSecret(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (text.length <= 4) return "****";
+    return `****${text.slice(-4)}`;
+  }
+
+  function sanitizeDebug(value) {
+    if (Array.isArray(value)) return value.map(sanitizeDebug);
+    if (!value || typeof value !== "object") return value;
+
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (/api[_-]?key/i.test(key)) out[key] = maskSecret(val);
+      else out[key] = sanitizeDebug(val);
+    }
+    return out;
+  }
+
   function setDebug(obj) {
     if (!debugEl) return;
-    debugEl.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+    const safeObj = typeof obj === "string" ? obj : sanitizeDebug(obj);
+    debugEl.textContent = typeof safeObj === "string" ? safeObj : JSON.stringify(safeObj, null, 2);
     scheduleResize();
   }
 
@@ -132,17 +152,21 @@
 
   async function getSettings() {
     const metadata = await client.metadata().catch(() => ({}));
-    let settings =
+    const metadataSettings =
       (metadata && metadata.settings) ||
       (metadata && metadata.installationSettings) ||
       (metadata && metadata.config) ||
       {};
 
     const got = await client.get("settings").catch(() => ({}));
-    if (got && Object.keys(got).length) {
-      const fromGet = got.settings && Object.keys(got.settings).length ? got.settings : got;
-      settings = Object.assign({}, settings, fromGet);
-    }
+    const runtimeSettings =
+      got && Object.keys(got).length
+        ? got.settings && Object.keys(got.settings).length
+          ? got.settings
+          : got
+        : {};
+
+    const settings = Object.assign({}, metadataSettings, runtimeSettings);
 
     const baseUrl =
       settings.backend_base_url ||
@@ -158,11 +182,19 @@
       settings.rootFolderId ||
       "";
 
+    // secure setting: leer desde runtime (client.get("settings")), no desde metadata
     const apiKey =
-      settings.backend_api_key ||
-      settings.backendApiKey ||
-      settings.api_key ||
-      settings.apiKey ||
+      runtimeSettings.backend_api_key ||
+      runtimeSettings.backendApiKey ||
+      runtimeSettings.api_key ||
+      runtimeSettings.apiKey ||
+      "";
+
+    const sharedDriveId =
+      settings.drive_shared_drive_id ||
+      settings.driveSharedDriveId ||
+      settings.shared_drive_id ||
+      settings.sharedDriveId ||
       "";
 
     const timeout =
@@ -176,7 +208,8 @@
       backend_base_url: String(baseUrl || "").trim().replace(/\/$/, ""),
       backend_api_key: String(apiKey || "").trim(),
       drive_root_folder_id: String(rootFolderId || "").trim(),
-      backend_timeout_ms: Number(timeout || 20000),
+      drive_shared_drive_id: String(sharedDriveId || "").trim(),
+      backend_timeout_ms: Math.max(Number(timeout || 20000), 1000),
     };
   }
 
@@ -392,15 +425,19 @@
         err.status = res.status;
         err.body = bodyText;
         err.json = bodyJson;
+        err.endpoint = path;
+        err.request_url = url;
         throw err;
       }
 
-      return { status: res.status, body: bodyText, json: bodyJson };
+      return { status: res.status, body: bodyText, json: bodyJson, endpoint: path, request_url: url };
     } catch (e) {
       if (e && e.name === "AbortError") {
         const timeoutError = new Error("Timeout de backend");
         timeoutError.status = 0;
         timeoutError.body = "";
+        timeoutError.endpoint = path;
+        timeoutError.request_url = url;
         throw timeoutError;
       }
       throw e;
@@ -414,6 +451,8 @@
       message: (error && error.message) || "Error",
       status: error && Object.prototype.hasOwnProperty.call(error, "status") ? error.status : null,
       body: error && Object.prototype.hasOwnProperty.call(error, "body") ? error.body : null,
+      endpoint: error && Object.prototype.hasOwnProperty.call(error, "endpoint") ? error.endpoint : null,
+      request_url: error && Object.prototype.hasOwnProperty.call(error, "request_url") ? error.request_url : null,
     };
   }
 
@@ -500,11 +539,11 @@
     try {
       setStatus("Cargando estado...");
 
-      debug.request = {};
+      debug.request = { endpoint: API_ROUTES.config, request_url: `${state.settings.backend_base_url}${API_ROUTES.config}`, method: "GET" };
       const res = await backendFetchJson(API_ROUTES.config);
       const data = res.json || {};
 
-      debug.response = data;
+      debug.response = { status: res.status, body: data };
 
       const templateEntries = [];
       if (Array.isArray(data.templates)) {
@@ -564,7 +603,11 @@
         deal_id: Number(state.deal.id),
         drive_root_folder_id: normalizedRootFolderId,
       };
+      if (state.settings.drive_shared_drive_id) {
+        payload.drive_shared_drive_id = state.settings.drive_shared_drive_id;
+      }
 
+      debug.request = { endpoint: API_ROUTES.driveFolderEnsure, request_url: `${state.settings.backend_base_url}${API_ROUTES.driveFolderEnsure}`, method: "POST" };
       debug.payload = payload;
 
       const res = await backendFetchJson(API_ROUTES.driveFolderEnsure, {
@@ -572,11 +615,15 @@
         data: payload,
       });
 
-      debug.response = res.json || { status: res.status, body: res.body };
+      debug.response = { status: res.status, body: res.json || res.body };
       const data = res.json || {};
 
       state.deal_folder_url = data.web_view_url || data.drive_folder_url || data.folder_url || state.deal_folder_url;
       state.deal_folder_id = data.folder_id || data.drive_folder_id || state.deal_folder_id;
+      if (state.deal) {
+        state.deal.folder_id = state.deal_folder_id;
+        state.deal.web_view_url = state.deal_folder_url;
+      }
 
       if (btnOpenFolder) btnOpenFolder.disabled = !state.deal_folder_url;
       if (btnGenerate) btnGenerate.disabled = !state.deal_folder_id;
@@ -595,6 +642,19 @@
 
   function onOpenFolder() {
     openUrlSafely(state.deal_folder_url || state.last_doc_url);
+  }
+
+  function validateRequiredPlaceholders(objectPayload, fecha) {
+    const required = [
+      ["object.run", objectPayload.run],
+      ["object.nombres", objectPayload.nombres],
+      ["object.paterno", objectPayload.paterno],
+      ["object.prevision", objectPayload.prevision],
+      ["object.fecha_nacimiento", objectPayload.fecha_nacimiento],
+      ["fecha", fecha],
+    ];
+
+    return required.filter(([, value]) => !String(value || "").trim()).map(([name]) => name);
   }
 
   async function onGenerate() {
@@ -625,10 +685,17 @@
         nombres: state.payload.first_name,
         paterno: state.payload.last_name,
         prevision: state.payload.tramo_modalidad,
+        fecha_nacimiento: state.payload.birth_date,
       });
 
+      const fecha = new Date().toISOString().slice(0, 10);
+      const missing = validateRequiredPlaceholders(objectPayload, fecha);
+      if (missing.length) {
+        throw new Error(`Faltan placeholders requeridos: ${missing.join(", ")}`);
+      }
+
       const payload = {
-        fecha: new Date().toISOString().slice(0, 10),
+        fecha,
         object: objectPayload,
         deal: {
           folder_id: state.deal_folder_id,
@@ -638,6 +705,7 @@
       if (selectedKind === "package") payload.package_key = selectedKey;
       else payload.template_key = selectedKey;
 
+      debug.request = { endpoint: API_ROUTES.render, request_url: `${state.settings.backend_base_url}${API_ROUTES.render}`, method: "POST" };
       debug.payload = payload;
 
       const res = await backendFetchJson(API_ROUTES.render, {
@@ -645,7 +713,7 @@
         data: payload,
       });
 
-      debug.response = res.json || { status: res.status, body: res.body };
+      debug.response = { status: res.status, body: res.json || res.body };
       const data = res.json || {};
 
       const url = data.pdf_web_view_url || data.doc_url || data.url || data.download_url || data.webViewLink || null;
@@ -749,7 +817,7 @@
 
     try {
       state.settings = await getSettings();
-      debug.settings = state.settings;
+      debug.settings = Object.assign({}, state.settings, { backend_api_key: maskSecret(state.settings.backend_api_key) });
 
       // Validaciones suaves (sin TypeError)
       if (!state.settings.backend_base_url) {
