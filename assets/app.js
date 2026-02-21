@@ -5,6 +5,8 @@
   const statusEl = document.getElementById("status");
   const debugEl = document.getElementById("debug");
   const debugDetails = document.getElementById("debugDetails");
+  const pdfResultEl = document.getElementById("pdfResult");
+  const pdfLinkEl = document.getElementById("pdfLink");
 
   const btnEnsureFolder = document.getElementById("btnEnsureFolder");
   const btnOpenFolder = document.getElementById("btnOpenFolder");
@@ -12,7 +14,7 @@
   const btnCreateNote = document.getElementById("btnCreateNote");
   const templateSelect = document.getElementById("templateSelect");
 
-  const DEFAULT_BACKEND_BASE_URL = "https://sell-medinet-backend.onrender.com";
+  const DEFAULT_BACKEND_BASE_URL = "https://sell-medinet-documentos-dinamicos-pdf.onrender.com";
 
   const FIELD_IDS = {
     rut: 2540090,
@@ -45,8 +47,8 @@
     deal: null,
     contact: null,
     payload: null,
-    drive_folder_url: null,
-    drive_folder_id: null,
+    deal_folder_url: null,
+    deal_folder_id: null,
     last_doc_url: null,
     templates: [],
   };
@@ -61,6 +63,17 @@
     if (!debugEl) return;
     debugEl.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
     scheduleResize();
+  }
+
+  function setPdfLink(url) {
+    if (!pdfResultEl || !pdfLinkEl) return;
+    if (!url) {
+      pdfResultEl.style.display = "none";
+      pdfLinkEl.href = "#";
+      return;
+    }
+    pdfResultEl.style.display = "block";
+    pdfLinkEl.href = url;
   }
 
   function isObject(x) {
@@ -145,11 +158,11 @@
       settings.rootFolderId ||
       "";
 
-    const sharedDriveId =
-      settings.drive_shared_drive_id ||
-      settings.driveSharedDriveId ||
-      settings.shared_drive_id ||
-      settings.sharedDriveId ||
+    const apiKey =
+      settings.backend_api_key ||
+      settings.backendApiKey ||
+      settings.api_key ||
+      settings.apiKey ||
       "";
 
     const timeout =
@@ -161,8 +174,8 @@
 
     return {
       backend_base_url: String(baseUrl || "").trim().replace(/\/$/, ""),
+      backend_api_key: String(apiKey || "").trim(),
       drive_root_folder_id: String(rootFolderId || "").trim(),
-      drive_shared_drive_id: String(sharedDriveId || "").trim(),
       backend_timeout_ms: Number(timeout || 20000),
     };
   }
@@ -351,7 +364,7 @@
         method,
         headers: {
           "Content-Type": "application/json",
-          "X-API-Key": "{{setting.backend_api_key}}",
+          "x-api-key": s.backend_api_key,
         },
         body: data ? JSON.stringify(data) : undefined,
         signal: controller.signal,
@@ -375,11 +388,7 @@
         throw err;
       }
 
-      return {
-        status: res.status,
-        body: bodyText,
-        json: bodyJson,
-      };
+      return { status: res.status, body: bodyText, json: bodyJson };
     } catch (e) {
       if (e && e.name === "AbortError") {
         const timeoutError = new Error("Timeout de backend");
@@ -393,22 +402,12 @@
     }
   }
 
-  function backendRequest(path, { method = "GET", data = null, qs = "" } = {}) {
-    const s = state.settings;
-    const url = `${s.backend_base_url}${path}${qs || ""}`;
-
-    const options = {
-      url,
-      type: method,
-      contentType: "application/json",
-      headers: {
-        "X-API-Key": "{{setting.backend_api_key}}",
-      },
-      secure: true,
+  function formatError(error) {
+    return {
+      message: (error && error.message) || "Error",
+      status: error && Object.prototype.hasOwnProperty.call(error, "status") ? error.status : null,
+      body: error && Object.prototype.hasOwnProperty.call(error, "body") ? error.body : null,
     };
-
-    if (data) options.data = JSON.stringify(data);
-    return requestWithTimeout(options, s.backend_timeout_ms);
   }
 
   function setButtonsEnabled(enabled) {
@@ -442,13 +441,15 @@
 
     for (const t of state.templates) {
       const opt = document.createElement("option");
-      opt.value = t.key || t.id || "";
+      const key = t.key || t.id || "";
+      const kind = t.kind || "template";
+      opt.value = `${kind}:${key}`;
       opt.textContent = t.name || t.label || t.key || "(sin nombre)";
       templateSelect.appendChild(opt);
     }
 
     templateSelect.disabled = false;
-    if (btnGenerate) btnGenerate.disabled = false;
+    if (btnGenerate) btnGenerate.disabled = !state.deal_folder_id;
   }
 
   function openUrlSafely(url) {
@@ -492,31 +493,39 @@
     try {
       setStatus("Cargando estado...");
 
-      const dealId = state.deal ? Number(state.deal.id) : null;
-      if (!dealId) throw new Error("No hay deal_id");
+      debug.request = {};
+      const res = await backendFetchJson("/v1/config");
+      const data = res.json || {};
 
-      debug.request = { deal_id: dealId };
-      const res = await backendRequest("/sell/status", {
-        method: "GET",
-        qs: `?deal_id=${encodeURIComponent(String(dealId))}`,
-      });
+      debug.response = data;
 
-      debug.response = res;
+      const templateEntries = [];
+      if (Array.isArray(data.templates)) {
+        templateEntries.push(...data.templates.map((item) =>
+          typeof item === "string"
+            ? { kind: "template", key: item, name: item }
+            : { kind: "template", key: item.key || item.template_key, name: item.name || item.key || item.template_key }
+        ));
+      }
+      if (Array.isArray(data.template_keys)) {
+        templateEntries.push(...data.template_keys.map((item) => ({ kind: "template", key: String(item), name: String(item) })));
+      }
+      if (Array.isArray(data.packages)) {
+        templateEntries.push(...data.packages.map((item) =>
+          typeof item === "string"
+            ? { kind: "package", key: item, name: item }
+            : { kind: "package", key: item.package_key || item.key, name: item.name || item.package_key || item.key }
+        ));
+      }
+      populateTemplates(templateEntries.filter((item) => item && item.key));
 
-      const data = res && res.data ? res.data : res;
-      state.drive_folder_url = data.drive_folder_url || data.folder_url || null;
-      state.drive_folder_id = data.drive_folder_id || data.folder_id || null;
-      state.last_doc_url = data.last_doc_url || data.doc_url || null;
-
-      populateTemplates(data.templates || []);
-
-      if (btnOpenFolder) btnOpenFolder.disabled = !state.drive_folder_url;
+      if (btnOpenFolder) btnOpenFolder.disabled = !state.deal_folder_url;
       if (btnCreateNote) btnCreateNote.disabled = false;
 
       setStatus("Listo ✅");
       setDebug(debug);
     } catch (e) {
-      debug.error = { name: e && e.name, message: e && e.message };
+      debug.error = formatError(e);
       // No bloqueamos la app si el status no existe; igual se puede asegurar carpeta.
       setStatus("Listo ✅ (sin status)");
       setDebug(debug);
@@ -540,21 +549,18 @@
         throw new Error("Falta setting: drive_root_folder_id.");
       }
 
-      if (!state.payload) {
-        throw new Error("No se pudo construir payload.");
-      }
-
       setStatus("Creando/asegurando carpeta Drive...");
 
       const normalizedRootFolderId = normalizeDriveId(state.settings.drive_root_folder_id);
 
-      const payload = Object.assign({}, state.payload, {
+      const payload = {
+        deal_id: Number(state.deal.id),
         drive_root_folder_id: normalizedRootFolderId,
-      });
+      };
 
       debug.payload = payload;
 
-      const res = await backendFetchJson("/drive/folder/ensure", {
+      const res = await backendFetchJson("/v1/drive/folder/ensure", {
         method: "POST",
         data: payload,
       });
@@ -562,10 +568,11 @@
       debug.response = res.json || { status: res.status, body: res.body };
       const data = res.json || {};
 
-      state.drive_folder_url = data.drive_folder_url || data.folder_url || state.drive_folder_url;
-      state.drive_folder_id = data.drive_folder_id || data.folder_id || state.drive_folder_id;
+      state.deal_folder_url = data.web_view_url || data.drive_folder_url || data.folder_url || state.deal_folder_url;
+      state.deal_folder_id = data.folder_id || data.drive_folder_id || state.deal_folder_id;
 
-      if (btnOpenFolder) btnOpenFolder.disabled = !state.drive_folder_url;
+      if (btnOpenFolder) btnOpenFolder.disabled = !state.deal_folder_url;
+      if (btnGenerate) btnGenerate.disabled = !state.deal_folder_id;
 
       setStatus("Carpeta lista ✅");
       setDebug(debug);
@@ -573,18 +580,14 @@
       // refrescar status para cargar templates/links si backend lo soporta
       refreshStatus();
     } catch (e) {
-      debug.error = {
-        message: (e && e.message) || "Error",
-        status: e && Object.prototype.hasOwnProperty.call(e, "status") ? e.status : null,
-        body: e && Object.prototype.hasOwnProperty.call(e, "body") ? e.body : null,
-      };
+      debug.error = formatError(e);
       setStatus(e && e.message ? e.message : "Error");
       setDebug(debug);
     }
   }
 
   function onOpenFolder() {
-    openUrlSafely(state.drive_folder_url || state.last_doc_url);
+    openUrlSafely(state.deal_folder_url || state.last_doc_url);
   }
 
   async function onGenerate() {
@@ -599,33 +602,48 @@
     let win = null;
 
     try {
-      const templateKey = templateSelect ? String(templateSelect.value || "") : "";
-      if (!templateKey) throw new Error("Selecciona una plantilla.");
+      const selectedTemplate = templateSelect ? String(templateSelect.value || "") : "";
+      if (!selectedTemplate) throw new Error("Selecciona una plantilla.");
+      const [selectedKind, selectedKey] = selectedTemplate.split(":");
+      if (!selectedKey) throw new Error("Plantilla inválida.");
       if (!state.payload) throw new Error("No se pudo construir payload.");
+      if (!state.deal_folder_id) throw new Error("Primero debes crear Drive Carpeta.");
 
       win = preopenWindow();
 
       setStatus("Generando documento...");
 
-      const payload = Object.assign({}, state.payload, {
-        template_key: templateKey,
-        drive_folder_id: state.drive_folder_id || undefined,
-        drive_root_folder_id: state.settings.drive_root_folder_id,
-        drive_shared_drive_id: state.settings.drive_shared_drive_id || undefined,
+      const objectPayload = Object.assign({}, state.payload, {
+        run: state.payload.rut,
+        nombres: state.payload.first_name,
+        paterno: state.payload.last_name,
+        prevision: state.payload.tramo_modalidad,
       });
+
+      const payload = {
+        fecha: new Date().toISOString().slice(0, 10),
+        object: objectPayload,
+        deal: {
+          folder_id: state.deal_folder_id,
+        },
+      };
+
+      if (selectedKind === "package") payload.package_key = selectedKey;
+      else payload.template_key = selectedKey;
 
       debug.payload = payload;
 
-      const res = await backendRequest("/drive/doc/generate", {
+      const res = await backendFetchJson("/v1/render", {
         method: "POST",
         data: payload,
       });
 
-      debug.response = res;
-      const data = res && res.data ? res.data : res;
+      debug.response = res.json || { status: res.status, body: res.body };
+      const data = res.json || {};
 
-      const url = data.doc_url || data.url || data.download_url || data.webViewLink || null;
+      const url = data.pdf_web_view_url || data.doc_url || data.url || data.download_url || data.webViewLink || null;
       state.last_doc_url = url || state.last_doc_url;
+      setPdfLink(state.last_doc_url);
 
       if (url) {
         if (win && !win.closed) {
@@ -644,7 +662,7 @@
 
       refreshStatus();
     } catch (e) {
-      debug.error = { name: e && e.name, message: e && e.message };
+      debug.error = formatError(e);
       if (win && !win.closed) {
         try {
           win.close();
@@ -672,7 +690,7 @@
       setStatus("Creando nota en Sell...");
 
       const links = [];
-      if (state.drive_folder_url) links.push({ label: "📁 Carpeta Drive", url: state.drive_folder_url });
+      if (state.deal_folder_url) links.push({ label: "📁 Carpeta Drive", url: state.deal_folder_url });
       if (state.last_doc_url) links.push({ label: "📄 Último documento", url: state.last_doc_url });
 
       const payload = {
@@ -684,16 +702,22 @@
 
       debug.payload = payload;
 
-      const res = await backendRequest("/sell/note/create", {
-        method: "POST",
-        data: payload,
-      });
-
+      const res = await requestWithTimeout({
+        url: "/v2/notes",
+        type: "POST",
+        contentType: "application/json",
+        data: JSON.stringify({
+          content: links.map((l) => `${l.label}: ${l.url}`).join("\n") || "Sin links disponibles",
+          resource_type: "deal",
+          resource_id: Number(state.deal.id),
+        }),
+      }, state.settings.backend_timeout_ms);
+      if (!res) throw new Error("No se pudo crear nota");
       debug.response = res;
       setStatus("Nota creada ✅");
       setDebug(debug);
     } catch (e) {
-      debug.error = { name: e && e.name, message: e && e.message };
+      debug.error = formatError(e);
       setStatus(e && e.message ? e.message : "Error");
       setDebug(debug);
     }
@@ -703,6 +727,7 @@
   async function boot() {
     setStatus("Cargando...");
     setButtonsEnabled(false);
+    setPdfLink(null);
 
     const debug = {
       action: "boot",
@@ -723,6 +748,9 @@
       if (!state.settings.backend_base_url) {
         debug.warnings.push("backend_base_url vacío; usando default");
         state.settings.backend_base_url = DEFAULT_BACKEND_BASE_URL;
+      }
+      if (!state.settings.backend_api_key) {
+        debug.warnings.push("Falta backend_api_key (requerido para backend Render)");
       }
       if (!state.settings.drive_root_folder_id) {
         debug.warnings.push("Falta drive_root_folder_id (requerido para Drive)");
@@ -758,16 +786,18 @@
 
       // Habilitar acciones base
       setButtonsEnabled(true);
+      if (btnGenerate) btnGenerate.disabled = true;
+      if (btnOpenFolder) btnOpenFolder.disabled = true;
 
       // Si falta root folder, deshabilitar acciones Drive que lo requieren
-      if (!state.settings.drive_root_folder_id) {
+      if (!state.settings.drive_root_folder_id || !state.settings.backend_api_key) {
         if (btnEnsureFolder) btnEnsureFolder.disabled = true;
         if (btnGenerate) btnGenerate.disabled = true;
         if (templateSelect) {
           templateSelect.disabled = true;
-          templateSelect.innerHTML = "<option value=\"\">(Configura drive_root_folder_id)</option>";
+          templateSelect.innerHTML = "<option value=\"\">(Configura backend_api_key y drive_root_folder_id)</option>";
         }
-        setStatus("Configura drive_root_folder_id para habilitar Drive.");
+        setStatus("Configura backend_api_key y drive_root_folder_id para habilitar Drive.");
       } else {
         // cargar status y templates si existe
         await refreshStatus();
@@ -777,7 +807,7 @@
 
       scheduleResize();
     } catch (e) {
-      debug.error = { name: e && e.name, message: e && e.message };
+      debug.error = formatError(e);
       setStatus(e && e.message ? e.message : "Error al iniciar");
       setDebug(debug);
       setButtonsEnabled(false);

@@ -12,7 +12,8 @@
     }
   },
   "domainWhitelist": [
-    "sell-medinet-backend.onrender.com"
+    "sell-medinet-backend.onrender.com",
+    "sell-medinet-documentos-dinamicos-pdf.onrender.com"
   ],
   "parameters": [
     {
