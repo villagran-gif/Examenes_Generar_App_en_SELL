@@ -59,9 +59,29 @@
     scheduleResize();
   }
 
+  function maskSecret(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (text.length <= 4) return "****";
+    return `****${text.slice(-4)}`;
+  }
+
+  function sanitizeDebug(value) {
+    if (Array.isArray(value)) return value.map(sanitizeDebug);
+    if (!value || typeof value !== "object") return value;
+
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (/api[_-]?key/i.test(key)) out[key] = maskSecret(val);
+      else out[key] = sanitizeDebug(val);
+    }
+    return out;
+  }
+
   function setDebug(obj) {
     if (!debugEl) return;
-    debugEl.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+    const safeObj = typeof obj === "string" ? obj : sanitizeDebug(obj);
+    debugEl.textContent = typeof safeObj === "string" ? safeObj : JSON.stringify(safeObj, null, 2);
     scheduleResize();
   }
 
@@ -138,7 +158,15 @@
       (metadata && metadata.config) ||
       {};
 
-    const settings = Object.assign({}, metadataSettings);
+    const got = await client.get("settings").catch(() => ({}));
+    const runtimeSettings =
+      got && Object.keys(got).length
+        ? got.settings && Object.keys(got.settings).length
+          ? got.settings
+          : got
+        : {};
+
+    const settings = Object.assign({}, metadataSettings, runtimeSettings);
 
     const baseUrl =
       settings.backend_base_url ||
@@ -152,6 +180,14 @@
       settings.driveRootFolderId ||
       settings.root_folder_id ||
       settings.rootFolderId ||
+      "";
+
+    // secure setting: leer desde runtime (client.get("settings")), no desde metadata
+    const apiKey =
+      runtimeSettings.backend_api_key ||
+      runtimeSettings.backendApiKey ||
+      runtimeSettings.api_key ||
+      runtimeSettings.apiKey ||
       "";
 
     const sharedDriveId =
@@ -619,6 +655,19 @@
     return required.filter(([, value]) => !String(value || "").trim()).map(([name]) => name);
   }
 
+  function validateRequiredPlaceholders(objectPayload, fecha) {
+    const required = [
+      ["object.run", objectPayload.run],
+      ["object.nombres", objectPayload.nombres],
+      ["object.paterno", objectPayload.paterno],
+      ["object.prevision", objectPayload.prevision],
+      ["object.fecha_nacimiento", objectPayload.fecha_nacimiento],
+      ["fecha", fecha],
+    ];
+
+    return required.filter(([, value]) => !String(value || "").trim()).map(([name]) => name);
+  }
+
   async function onGenerate() {
     const debug = {
       action: "drive_doc_generate",
@@ -778,7 +827,7 @@
 
     try {
       state.settings = await getSettings();
-      debug.settings = state.settings;
+      debug.settings = Object.assign({}, state.settings, { backend_api_key: maskSecret(state.settings.backend_api_key) });
 
       // Validaciones suaves (sin TypeError)
       if (!state.settings.backend_base_url) {

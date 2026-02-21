@@ -29,6 +29,7 @@
       "scopes": [
         "header"
       ]
+      "secure": true
     },
     {
       "name": "drive_root_folder_id",
